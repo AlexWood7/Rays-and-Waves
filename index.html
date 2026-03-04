@@ -177,6 +177,7 @@ button, input, select, label, .val, .ctrl, .controls-bar,
       <select id="presetSelect">
        <option value="sandbox">Sandbox</option>
        <option value="rectangularBlock">Rectangular Block</option>
+       <option value="apparentDepth">Apparent Depth</option>
        <option value="semiCircularBlock">Semi-circular Block</option>
        <option value="prism">Prism</option>
        <option value="rainbow">Rainbow</option>
@@ -643,7 +644,14 @@ function makeValEditable(valElement, slider, formatFunc){
  });
 }
 function updateWaveReadouts(){
- waveWidthOut.textContent = parseFloat(waveWidthSlider.value).toFixed(1)+' cm';
+ const waveType = getWaveType();
+ const widthValue = parseFloat(waveWidthSlider.value);
+ if (waveType === 'point') {
+  const degrees = (widthValue / 50) * 120;
+  waveWidthOut.textContent = degrees.toFixed(0) + '°';
+ } else {
+  waveWidthOut.textContent = widthValue.toFixed(1) + ' cm';
+ }
  speedOut.textContent = parseFloat(speedScaleSlider.value).toFixed(2)+'×';
  wavelengthOut.textContent = parseFloat(wavelengthSlider.value).toFixed(1)+' cm';
  updatePlaneWaveMinX();
@@ -659,10 +667,29 @@ function updatePlaneWaveMinX(){
 }
 makeValEditable(speedOut, speedScaleSlider, (v)=> v.toFixed(2)+'×');
 makeValEditable(wavelengthOut, wavelengthSlider, (v)=> v.toFixed(1)+' cm');
-makeValEditable(waveWidthOut, waveWidthSlider, (v)=> v.toFixed(1)+' cm');
+makeValEditable(waveWidthOut, waveWidthSlider, (v)=> {
+ const waveType = getWaveType();
+ if (waveType === 'point') {
+  const degrees = (v / 50) * 120;
+  return degrees.toFixed(0) + '°';
+ }
+ return v.toFixed(1) + ' cm';
+});
 waveWidthSlider.addEventListener('input', updateWaveReadouts);
+waveWidthSlider.addEventListener('input', () => {
+ // User manually adjusted width - disable auto-updating
+ userOverrideWaveWidth = true;
+});
 speedScaleSlider.addEventListener('input', updateWaveReadouts);
 wavelengthSlider.addEventListener('input', updateWaveReadouts);
+// Update readouts when wave type changes
+document.querySelectorAll('input[name="waveType"]').forEach(radio => {
+ radio.addEventListener('change', () => {
+  updateWaveReadouts();
+  // Reset override when changing wave type
+  userOverrideWaveWidth = false;
+ });
+});
 // ===== Lens controls & state =====
 const lensEnabledCheckboxes = ['lens1Enabled','lens2Enabled','lens3Enabled','lens4Enabled','lens5Enabled','lens6Enabled','lens7Enabled','lens8Enabled','lens9Enabled'].map(id => document.getElementById(id));
 const lensBlocks = ['lens1','lens2','lens3','lens4','lens5','lens6','lens7','lens8','lens9'].map(id => document.getElementById(id));
@@ -2553,13 +2580,13 @@ function wavelengthToRefractiveOffset(wavelength) {
 
 // ===== Particle System (OOP) =====
 class Particle {
- constructor(xcm, ycm, vx, vy, colorPhase = 1) {
+ constructor(xcm, ycm, vx, vy, colorPhase = 1, insideLensId = -1) {
   this.xcm = xcm;
   this.ycm = ycm;
   this.vx = vx;
   this.vy = vy;
   this.colorPhase = colorPhase;
-  this.insideLensId = -1;
+  this.insideLensId = insideLensId;
   this.dead = false;
  }
  
@@ -2762,36 +2789,57 @@ class ParticleSystem {
      const xcm = sourceXcm + perpX * offset;
      const ycm = sourceYcm + perpY * offset;
      const colorPhase = whiteLightSpectrum ? (i % 25) : (i % 3);
-     this.particles.push(new Particle(xcm, ycm, vx, vy, colorPhase));
+     const spawnLensId = detectCurrentLens(xcm, ycm);
+     this.particles.push(new Particle(xcm, ycm, vx, vy, colorPhase, spawnLensId));
     }
   } else {
    // Point source: angular spread
    if(manualDirectionMode){
     // Manual mode: spread around manual angle
-    // Map waveWidth (0-50cm) to angular spread (0-60 degrees) to match auto-target behavior
-    const spreadAngle = (waveWidth / 50) * (Math.PI / 3); // 0° to 60° based on width
+    // Map waveWidth (0-50cm) to angular spread (0-120 degrees) to match auto-target behavior
+    const spreadAngle = (waveWidth / 50) * (Math.PI * 2 / 3); // 0° to 120° based on width
+    const pointSourceLensId = detectCurrentLens(pointSourceXcm, pointSourceYcm);
     for(let i = 0; i < count; i++){
      const t = (i + 0.5) / count;
      const a = manualDirectionAngle - spreadAngle / 2 + spreadAngle * t;
      const colorPhase = whiteLightSpectrum ? (i % 25) : (i % 3);
-     this.particles.push(new Particle(pointSourceXcm, pointSourceYcm, Math.cos(a), Math.sin(a), colorPhase));
+     this.particles.push(new Particle(pointSourceXcm, pointSourceYcm, Math.cos(a), Math.sin(a), colorPhase, pointSourceLensId));
     }
   } else {
    // Auto-target mode
    const targetLens = getPrimaryTargetLens();
    const lensX = targetLens.xcm;
-    const lensYtop = targetLens.ycm - waveWidth / 2;
-    const lensYbottom = targetLens.ycm + waveWidth / 2;
+    // Use user-set width if overridden, otherwise use 90% of lens height
+    let targetHeight;
+    if (userOverrideWaveWidth) {
+      // Convert waveWidth (0-50) to angular spread (0-120°), then to linear extent at lens distance
+      const desiredSpreadAngle = (waveWidth / 50) * (Math.PI * 2 / 3);
+      const dx = lensX - pointSourceXcm;
+      targetHeight = 2 * Math.abs(dx) * Math.tan(desiredSpreadAngle / 2);
+    } else {
+      targetHeight = targetLens.H * 0.9;
+    }
+    const lensYtop = targetLens.ycm - targetHeight / 2;
+    const lensYbottom = targetLens.ycm + targetHeight / 2;
     const angleTop = Math.atan2(lensYtop - pointSourceYcm, lensX - pointSourceXcm);
     const angleBottom = Math.atan2(lensYbottom - pointSourceYcm, lensX - pointSourceXcm);
     const angleCenter = (angleTop + angleBottom) / 2;
     const angleSpread = Math.abs(angleBottom - angleTop);
     
+    const pointSourceLensId = detectCurrentLens(pointSourceXcm, pointSourceYcm);
     for(let i = 0; i < count; i++){
      const t = (i + 0.5) / count;
      const a = angleCenter - angleSpread / 2 + angleSpread * t;
      const colorPhase = whiteLightSpectrum ? (i % 25) : (i % 3);
-     this.particles.push(new Particle(pointSourceXcm, pointSourceYcm, Math.cos(a), Math.sin(a), colorPhase));
+     this.particles.push(new Particle(pointSourceXcm, pointSourceYcm, Math.cos(a), Math.sin(a), colorPhase, pointSourceLensId));
+    }
+    
+    // Update wave width slider to match calculated angular spread (only if user hasn't manually overridden)
+    if (!userOverrideWaveWidth) {
+     // Convert angular spread (radians) to width value (0-50 cm maps to 0-120° = 0 to 2π/3 radians)
+     const calculatedWidth = (angleSpread / (Math.PI * 2 / 3)) * 50;
+     waveWidthSlider.value = calculatedWidth.toFixed(1);
+     updateWaveReadouts();
     }
    }
   }
@@ -3074,6 +3122,7 @@ let planeWaveYcm = originYcm; // Y position of plane wave source
 // Manual direction control for wave sources
 let manualDirectionMode = false; // true = use manual angle, false = auto-target lens
 let manualDirectionAngle = 0; // Angle in radians when in manual mode
+let userOverrideWaveWidth = false; // true = user manually set width, don't auto-update
 // ===== Jupiter =====
 let jupiterXcm = 0; // Fixed at left edge
 const jupiterImg = new Image();
@@ -4350,7 +4399,23 @@ canvas.addEventListener('pointermove', (e)=>{
   // Calculate angle from source to cursor
   const dx = xcm - sourceXcm;
   const dy = ycm - sourceYcm;
-  manualDirectionAngle = Math.atan2(dy, dx);
+  let angle = Math.atan2(dy, dx) * 180 / Math.PI;
+  
+  // Gentle snap to 0, 90, 180, and 270 degrees (within ±3 degrees) - unless Alt is held
+  if(!e.altKey){
+   const snapThreshold = 3;
+   if(Math.abs(angle) < snapThreshold){
+    angle = 0;
+   } else if(Math.abs(angle - 90) < snapThreshold){
+    angle = 90;
+   } else if(Math.abs(angle + 90) < snapThreshold){
+    angle = -90;
+   } else if(Math.abs(angle - 180) < snapThreshold || Math.abs(angle + 180) < snapThreshold){
+    angle = 180;
+   }
+  }
+  
+  manualDirectionAngle = angle * Math.PI / 180;
   
   // Clear particles to respawn with new direction
   particleSystem.clear();
@@ -4364,7 +4429,17 @@ canvas.addEventListener('pointermove', (e)=>{
  const isTelescopePreset = (currentPreset === 'galilean' || currentPreset === 'astronomical');
  const maxDist = isTelescopePreset ? 5 : cmHeight/2 - 2;
  pointSourceXcm = clamp(xcm, 0, MAX_WORLD_WIDTH);
- pointSourceYcm = clamp(ycm, originYcm - maxDist, originYcm + maxDist);
+ let ny = ycm;
+ 
+ // Snap to optical axis when within 0.5cm (unless Alt is held)
+ if(!e.altKey){
+  const snapThreshold = 0.5;
+  if(Math.abs(ny - originYcm) < snapThreshold){
+   ny = originYcm;
+  }
+ }
+ 
+ pointSourceYcm = clamp(ny, originYcm - maxDist, originYcm + maxDist);
  e.preventDefault();
  return;
  }
@@ -4374,11 +4449,32 @@ canvas.addEventListener('pointermove', (e)=>{
  const isTelescopePreset = (currentPreset === 'galilean' || currentPreset === 'astronomical');
  const maxDist = isTelescopePreset ? 5 : cmHeight/2 - 2;
  if (showObjectsImages){
-  planeWaveXcm=0; const lim=5; planeWaveYcm=clamp(ycm, originYcm-lim, originYcm+lim);
-} else {
+  planeWaveXcm=0; const lim=5; 
+  let ny = ycm;
+  
+  // Snap to optical axis when within 0.5cm (unless Alt is held)
+  if(!e.altKey){
+   const snapThreshold = 0.5;
+   if(Math.abs(ny - originYcm) < snapThreshold){
+    ny = originYcm;
+   }
+  }
+  
+  planeWaveYcm=clamp(ny, originYcm-lim, originYcm+lim);
+ } else {
   planeWaveXcm = clamp(xcm, 0, MAX_WORLD_WIDTH);
-  planeWaveYcm = clamp(ycm, originYcm - maxDist, originYcm + maxDist);
-}
+  let ny = ycm;
+  
+  // Snap to optical axis when within 0.5cm (unless Alt is held)
+  if(!e.altKey){
+   const snapThreshold = 0.5;
+   if(Math.abs(ny - originYcm) < snapThreshold){
+    ny = originYcm;
+   }
+  }
+  
+  planeWaveYcm = clamp(ny, originYcm - maxDist, originYcm + maxDist);
+ }
  e.preventDefault();
  return;
  }
@@ -5158,6 +5254,14 @@ function getRayDefinitions(){
  const targetLens = getPrimaryTargetLens();
  const lensX = targetLens.xcm;
  const rays=[];
+ 
+ // In Rainbow preset, scale rays with width (max 15 rays at 10cm width, min 3 at 0cm)
+ // Beyond 10cm width, rays spread further apart rather than adding more
+ // RGB mode uses 3 rays like other presets
+ const numRays = (currentPreset === 'rainbow' && !whiteLight) 
+   ? Math.max(3, Math.min(15, Math.round(3 + waveWidthCm * 1.2)))
+   : 3;
+ 
  if(waveType === 'plane'){
  let angle;
  if(manualDirectionMode){
@@ -5172,21 +5276,58 @@ function getRayDefinitions(){
  const vy = Math.sin(angle);
  const perpX = -Math.sin(angle);
  const perpY = Math.cos(angle);
- const offsets = [0, -waveWidthCm/3, waveWidthCm/3];
+ 
+ // Generate offsets evenly spaced across the range
+ const offsets = [];
+ if(numRays === 1) {
+  offsets.push(0);
+ } else {
+  for(let i = 0; i < numRays; i++) {
+   const t = i / (numRays - 1); // 0 to 1
+   const off = (t - 0.5) * 2 * waveWidthCm / 3; // Range from -waveWidthCm/3 to +waveWidthCm/3
+   offsets.push(off);
+  }
+ }
+ 
  for(const off of offsets){
  const xcm = planeWaveXcm + perpX * off;
  const ycm = planeWaveYcm + perpY * off;
+ const insideLensId = detectCurrentLens(xcm, ycm);
  // Create new velocity for each ray to avoid sharing references
- rays.push({xcm, ycm, vx: vx, vy: vy});
+ rays.push({xcm, ycm, vx: vx, vy: vy, insideLensId});
  }
  } else {
- const offsets = [0, -waveWidthCm/3, waveWidthCm/3];
+ // Point source
+ let targetHeight;
+ if (userOverrideWaveWidth) {
+   // Convert waveWidth (0-50) to angular spread (0-120°), then to linear extent at lens distance
+   const desiredSpreadAngle = (waveWidthCm / 50) * (Math.PI * 2 / 3);
+   const dx = lensX - pointSourceXcm;
+   targetHeight = 2 * Math.abs(dx) * Math.tan(desiredSpreadAngle / 2);
+ } else {
+   targetHeight = targetLens.H * 0.9;
+ }
+ 
+ // Generate offsets evenly spaced across the range
+ const offsets = [];
+ if(numRays === 1) {
+  offsets.push(0);
+ } else {
+  const rangeSize = manualDirectionMode ? (waveWidthCm / 3) : (targetHeight / 3);
+  for(let i = 0; i < numRays; i++) {
+   const t = i / (numRays - 1); // 0 to 1
+   const off = (t - 0.5) * 2 * rangeSize; // Range from -rangeSize to +rangeSize
+   offsets.push(off);
+  }
+ }
+ 
+ const pointSourceInsideLensId = detectCurrentLens(pointSourceXcm, pointSourceYcm);
  for(const off of offsets){
  let angle;
  if(manualDirectionMode){
   // Manual mode: spread rays based on waveWidth
-  // Map waveWidth (0-50cm) to angular spread (0-60 degrees) to match auto-target behavior
-  const spreadAngle = (waveWidthCm / 50) * (Math.PI / 3);
+  // Map waveWidth (0-50cm) to angular spread (0-120 degrees) to match auto-target behavior
+  const spreadAngle = (waveWidthCm / 50) * (Math.PI * 2 / 3);
   // Avoid division by zero when waveWidth is 0
   const angleOffset = (waveWidthCm > 0) ? (off / (waveWidthCm/3)) * spreadAngle / 2 : 0;
   angle = manualDirectionAngle + angleOffset;
@@ -5197,7 +5338,7 @@ function getRayDefinitions(){
  const vx = Math.cos(angle);
  const vy = Math.sin(angle);
  // Create new velocity for each ray
- rays.push({xcm:pointSourceXcm, ycm:pointSourceYcm, vx: vx, vy: vy});
+ rays.push({xcm:pointSourceXcm, ycm:pointSourceYcm, vx: vx, vy: vy, insideLensId: pointSourceInsideLensId});
  }
  }
  return rays;
@@ -5411,7 +5552,7 @@ function drawRays(){
  const r = rays[rayIdx];
  
  for(const config of colorConfigs){
-  const traceResult = traceRay(r.xcm, r.ycm, r.vx, r.vy, rayIdx, config.nOffset);
+  const traceResult = traceRay(r.xcm, r.ycm, r.vx, r.vy, rayIdx, config.nOffset, 1.0, 0, r.insideLensId || -1);
   const allSegments = [...traceResult.segments, ...traceResult.reflectedRays];
   
   for(const segment of allSegments){
@@ -5529,7 +5670,7 @@ function drawVirtualRays(){
  const r = rays[rayIdx];
  
  for(const config of colorConfigs){
-  const traceResult = traceRay(r.xcm, r.ycm, r.vx, r.vy, rayIdx, config.nOffset);
+  const traceResult = traceRay(r.xcm, r.ycm, r.vx, r.vy, rayIdx, config.nOffset, 1.0, 0, r.insideLensId || -1);
   // For virtual rays, we only use the main transmitted ray (first segment)
   const pts = traceResult.segments[0]?.points || [];
   if(pts.length < 2) continue;
@@ -5676,7 +5817,7 @@ function traceRaysFromSource(srcXcm, srcYcm) {
   const allSegments = [];
   for (let idx = 0; idx < rays.length; idx++) {
     const r = rays[idx];
-    const result = traceRay(r.xcm, r.ycm, r.vx, r.vy, idx);
+    const result = traceRay(r.xcm, r.ycm, r.vx, r.vy, idx, 0, 1.0, 0, r.insideLensId || -1);
     // Include both main segment and all reflected ray segments
     allSegments.push(result.segments[0] || { points: [], interactedMirrors: [], mirrorReflections: [], lensRefractions: [] });
     for (const reflSeg of result.reflectedRays) {
@@ -5689,13 +5830,25 @@ function traceRaysFromSource(srcXcm, srcYcm) {
 const waveWidthCm = parseFloat(waveWidthSlider.value);
  const targetLens = getPrimaryTargetLens();
  const lensX = targetLens.xcm;
- const offsets = [0, -waveWidthCm / 3, waveWidthCm / 3];
+ let targetHeight;
+ if (userOverrideWaveWidth) {
+   // Convert waveWidth (0-50) to angular spread (0-120°), then to linear extent at lens distance
+   const desiredSpreadAngle = (waveWidthCm / 50) * (Math.PI * 2 / 3);
+   const dx = lensX - srcXcm;
+   targetHeight = 2 * Math.abs(dx) * Math.tan(desiredSpreadAngle / 2);
+ } else {
+   targetHeight = targetLens.H * 0.9;
+ }
+ const offsets = manualDirectionMode 
+   ? [0, -waveWidthCm / 3, waveWidthCm / 3]
+   : [0, -targetHeight / 3, targetHeight / 3];
  const allSegments = [];
+ const srcLensId = detectCurrentLens(srcXcm, srcYcm);
  for (let idx = 0; idx < offsets.length; idx++) {
   const off = offsets[idx];
   let angle;
   if (manualDirectionMode) {
-   const spreadAngle = (waveWidthCm / 50) * (Math.PI / 3);
+   const spreadAngle = (waveWidthCm / 50) * (Math.PI * 2 / 3);
    const angleOffset = (waveWidthCm > 0) ? (off / (waveWidthCm / 3)) * spreadAngle / 2 : 0;
    angle = manualDirectionAngle + angleOffset;
   } else {
@@ -5703,7 +5856,7 @@ const waveWidthCm = parseFloat(waveWidthSlider.value);
    angle = Math.atan2(targetY - srcYcm, lensX - srcXcm);
   }
   const vx = Math.cos(angle), vy = Math.sin(angle);
-  const result = traceRay(srcXcm, srcYcm, vx, vy, idx);
+  const result = traceRay(srcXcm, srcYcm, vx, vy, idx, 0, 1.0, 0, srcLensId);
   // Include both main segment and all reflected ray segments
   allSegments.push(result.segments[0] || { points: [], interactedMirrors: [], mirrorReflections: [], lensRefractions: [] });
   for (const reflSeg of result.reflectedRays) {
@@ -6342,6 +6495,7 @@ function setupButtonListeners() {
   document.getElementById('resetBtn').addEventListener('click', ()=>{
     particleSystem.clear();
     manualDirectionMode = false; // Reset to auto-target mode
+    userOverrideWaveWidth = false; // Reset width override
     if(currentPreset) {
       applyPreset(currentPreset);
       document.getElementById('presetSelect').value = currentPreset;
@@ -6597,40 +6751,44 @@ const presets = {
  },
  rainbow: {
      minWidth: 138,
-     maxHeight: 80,
+     maxHeight: 125,
+     centerX: 65.99999999999999,
+     centerY: 0,
      elements: [
-         null, // Slot 0: disabled lens
-         null, // Slot 1: disabled lens
-         null, // Slot 2: disabled lens
-         null, // Slot 3: disabled mirror
-         null, // Slot 4: disabled mirror
-         null, // Slot 5: disabled mirror
-         { xcm: 55.5, ycm: 36.390947758705636, fTarget: 50, type: 'curved', H: 30, n: 1.33, enabled: true, angle: -25.730854878156745, isBlock: true, blockType: 'curved', scale: 50, width: 20, vertexAngle: 60, curvedShape: 'circle' }, // Slot 6: circular block
-         null, // Slot 7: disabled block
-         null  // Slot 8: disabled block
+         { xcm: 40, ycm: 40, fTarget: 40.000000857968146, type: 'convex', H: 30, n: 1.5, enabled: false, angle: 0, isMirror: false, isBlock: false },
+         { xcm: 70, ycm: 40, fTarget: 49.99999892014634, type: 'convex', H: 30, n: 1.5, enabled: false, angle: 0, isMirror: false, isBlock: false },
+         { xcm: 90, ycm: 40, fTarget: 49.99999892014634, type: 'convex', H: 30, n: 1.5, enabled: false, angle: 0, isMirror: false, isBlock: false },
+         { xcm: 60, ycm: 40, fTarget: 50, type: 'planar', H: 30, n: 1.5, enabled: false, angle: 0, isMirror: true, isBlock: false },
+         { xcm: 80, ycm: 40, fTarget: 50, type: 'planar', H: 30, n: 1.5, enabled: false, angle: 0, isMirror: true, isBlock: false },
+         { xcm: 100, ycm: 40, fTarget: 50, type: 'planar', H: 30, n: 1.5, enabled: false, angle: 0, isMirror: true, isBlock: false },
+         { xcm: 55.5, ycm: 36.390947758705636, fTarget: 50, type: 'curved', H: 30, n: 1.33, enabled: true, angle: -25.730854878156745, isMirror: false, isBlock: true, blockType: 'curved', scale: 50, width: 20, vertexAngle: 60, curvedShape: 'circle' },
+         { xcm: 50, ycm: 40, fTarget: 50, type: 'rectangular', H: 30, n: 1.5, enabled: false, angle: 0, isMirror: false, isBlock: true, blockType: 'rectangular', scale: 30, width: 20, vertexAngle: 60, curvedShape: 'semi-circle' },
+         { xcm: 70, ycm: 40, fTarget: 50, type: 'rectangular', H: 30, n: 1.5, enabled: false, angle: 0, isMirror: false, isBlock: true, blockType: 'rectangular', scale: 30, width: 20, vertexAngle: 60, curvedShape: 'semi-circle' }
      ],
      waveSettings: {
+         wavelength: 8,
+         waveWidth: 5,
+         waveType: 'plane',
          pointSourceXcm: 25.45084745762712,
          pointSourceYcm: 66.64237288135593,
-         planeWaveXcm: 0,
-         planeWaveYcm: 59.560896677209456,
-         waveWidth: '0',
-         wavelength: '8',
-         waveType: 'point',
+         planeWaveXcm: 0.034416826003823786,
+         planeWaveYcm: 58.60229445506692,
          manualDirectionMode: true,
-         manualDirectionAngle: -0.17602476806620015
+         manualDirectionAngle: 0
      },
      displaySettings: {
+         showWavefronts: false,
+         showRays: true,
+         showNormals: false,
          invertColors: true,
          whiteLight: false,
          whiteLightSpectrum: true,
-         showRays: true,
-         showWavefronts: false,
-         showNormals: false,
          allowTIR: true,
-         partialReflections: true
+         partialReflections: true,
+         showObjectsImages: false,
+         simplifiedImages: true
      },
-     speedScale: '0.12'
+     speedScale: 0.12
  },
  rectangularBlock: {
      minWidth: 119,
@@ -6665,6 +6823,47 @@ const presets = {
          allowTIR: false
      },
      speedScale: '0.33'
+ },
+ apparentDepth: {
+     minWidth: 45,
+     maxHeight: 43,
+     offsetX: -3,
+     offsetY: 10,
+     elements: [
+         { xcm: 40, ycm: 40, fTarget: 40.000000857968146, type: 'convex', H: 30, n: 1.5, enabled: false, angle: 0, isMirror: false, isBlock: false },
+         { xcm: 70, ycm: 40, fTarget: 49.99999892014634, type: 'convex', H: 30, n: 1.5, enabled: false, angle: 0, isMirror: false, isBlock: false },
+         { xcm: 90, ycm: 40, fTarget: 49.99999892014634, type: 'convex', H: 30, n: 1.5, enabled: false, angle: 0, isMirror: false, isBlock: false },
+         { xcm: 60, ycm: 40, fTarget: 50, type: 'planar', H: 30, n: 1.5, enabled: false, angle: 0, isMirror: true, isBlock: false },
+         { xcm: 80, ycm: 40, fTarget: 50, type: 'planar', H: 30, n: 1.5, enabled: false, angle: 0, isMirror: true, isBlock: false },
+         { xcm: 100, ycm: 40, fTarget: 50, type: 'planar', H: 30, n: 1.5, enabled: false, angle: 0, isMirror: true, isBlock: false },
+         { xcm: 25.5, ycm: 50.15313902181766, fTarget: 50, type: 'rectangular', H: 30, n: 1.5, enabled: true, angle: -90, isMirror: false, isBlock: true, blockType: 'rectangular', scale: 30, width: 20, vertexAngle: 60, curvedShape: 'semi-circle' },
+         { xcm: 50, ycm: 40, fTarget: 50, type: 'rectangular', H: 30, n: 1.5, enabled: false, angle: 0, isMirror: false, isBlock: true, blockType: 'rectangular', scale: 30, width: 20, vertexAngle: 60, curvedShape: 'semi-circle' },
+         { xcm: 70, ycm: 40, fTarget: 50, type: 'rectangular', H: 30, n: 1.5, enabled: false, angle: 0, isMirror: false, isBlock: true, blockType: 'rectangular', scale: 30, width: 20, vertexAngle: 60, curvedShape: 'semi-circle' }
+     ],
+     waveSettings: {
+         wavelength: 8,
+         waveWidth: 19.5,
+         waveType: 'point',
+         pointSourceXcm: 25.38499184339315,
+         pointSourceYcm: 40.0163132137031,
+         planeWaveXcm: 0,
+         planeWaveYcm: 40,
+         manualDirectionMode: true,
+         manualDirectionAngle: 1.5707963267948966
+     },
+     displaySettings: {
+         showWavefronts: false,
+         showRays: true,
+         showNormals: true,
+         invertColors: false,
+         whiteLight: false,
+         whiteLightSpectrum: false,
+         allowTIR: false,
+         partialReflections: false,
+         showObjectsImages: true,
+         simplifiedImages: false
+     },
+     speedScale: 0.33
  },
  semiCircularBlock: {
      minWidth: 95,
@@ -6797,6 +6996,7 @@ function applyPresetConfig(presetObj){
  // Reset to auto-target mode (unless preset specifies manual direction)
  if(!presetObj.waveSettings || presetObj.waveSettings.manualDirectionMode === undefined) {
      manualDirectionMode = false;
+     userOverrideWaveWidth = false; // Reset width override when resetting to auto-target
  }
  for(let i=0; i<9; i++){
      // Check if preset defines this component
