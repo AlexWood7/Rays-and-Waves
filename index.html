@@ -2670,7 +2670,10 @@ class Particle {
      // No partial reflection, just refract normally
      this.vx = result.vx;
      this.vy = result.vy;
-     this.insideLensId = result.newLensId;
+      // Keep medium unchanged during TIR (matches traceRay behavior)
+      if(!result.tir){
+       this.insideLensId = result.newLensId;
+      }
     }
     break;
    }
